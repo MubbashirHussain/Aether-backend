@@ -5,8 +5,10 @@ export const execYtDlp = (url: string): Promise<any> => {
   return new Promise((resolve, reject) => {
     const args = ["--dump-single-json", "--no-playlist", "--no-warnings", url];
 
+    const binary = process.env.YTDLP_PATH || (process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+
     const child = execFile(
-      "/opt/homebrew/bin/yt-dlp",
+      binary,
       args,
       { timeout: env.YTDLP_TIMEOUT_MS },
       (error, stdout, stderr) => {
