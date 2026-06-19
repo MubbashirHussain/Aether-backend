@@ -2,6 +2,7 @@ import pLimit from "p-limit";
 import { VideoMetadata, FormatItem } from "../types/index.js";
 import { execYtDlp } from "../utils/ytdlp.js";
 import { cacheManager } from "../utils/cache.js";
+import { testFormatUrls } from "../utils/urlValidator.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
 
@@ -48,7 +49,7 @@ export class ExtractorService {
     );
 
     const rawData = await limit(() => execYtDlp(url));
-    logger.info(rawData, "extracted raw data");
+
     const formats: FormatItem[] = (rawData.formats || [])
       .map((f: any) => ({
         formatId: f.format_id,
@@ -57,6 +58,9 @@ export class ExtractorService {
         url: f.url,
         filesize: f.filesize || f.filesize_approx,
         quality: f.format_note,
+        urlTested: false,
+        urlWorking: false,
+        isAudioAvailable: f.acodec !== undefined && f.acodec !== "none",
       }))
       .filter((f: FormatItem) => f.url);
 
@@ -73,6 +77,45 @@ export class ExtractorService {
       videoUrl: rawData.url || formats[0]?.url || "",
       formats,
     };
+
+    // Test all format URLs in parallel using HEAD requests
+    // This validates that CDN URLs are still accessible (TikTok URLs expire quickly)
+    logger.info(
+      { platform, formatCount: formats.length },
+      "Testing format URLs for accessibility",
+    );
+    try {
+      const urlTestResults = await testFormatUrls(
+        formats.map((f) => f.url),
+      );
+      for (const format of formats) {
+        const testResult = urlTestResults.get(format.url);
+        if (testResult) {
+          format.urlTested = testResult.urlTested;
+          format.urlWorking = testResult.urlWorking;
+        }
+      }
+    } catch (testError) {
+      logger.error(
+        { error: (testError as Error).message },
+        "URL testing failed, proceeding without test results",
+      );
+      // Non-critical — proceed with urlTested=false so frontend knows we didn't test
+    }
+
+    // Also test the top-level videoUrl if it's not already in formats
+    if (metadata.videoUrl && !formats.some((f) => f.url === metadata.videoUrl)) {
+      try {
+        const { testUrl } = await import("../utils/urlValidator.js");
+        const result = await testUrl(metadata.videoUrl);
+        logger.info(
+          { urlTested: result.urlTested, urlWorking: result.urlWorking },
+          "Top-level videoUrl test result",
+        );
+      } catch {
+        // Non-critical
+      }
+    }
 
     cacheManager.set(platform, url, metadata);
     return metadata;

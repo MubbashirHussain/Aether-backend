@@ -3,9 +3,10 @@ class RealtimeAnalyticsEngine {
     url_analyzed: 0,
     download_clicked: 0,
     download_unlocked: 0,
+    format_downloaded: 0,
     ad_view: 0,
     ad_closed: 0,
-    history_reused: 0
+    history_reused: 0,
   };
 
   increment(event: keyof typeof this.store): void {

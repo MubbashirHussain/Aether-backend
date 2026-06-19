@@ -5,6 +5,12 @@ export interface FormatItem {
   url: string;
   filesize?: number;
   quality?: string;
+  /** Whether the download URL was tested with a HEAD request */
+  urlTested: boolean;
+  /** Whether the URL responded successfully (only meaningful when urlTested is true) */
+  urlWorking: boolean;
+  /** Whether this format contains an audio stream */
+  isAudioAvailable: boolean;
 }
 
 export interface VideoMetadata {
