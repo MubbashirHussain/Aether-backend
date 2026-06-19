@@ -1,17 +1,22 @@
-import { Context } from 'hono';
-import { downloadService } from '../services/download.service.js';
-import { analyzeUrlSchema, unlockSessionSchema } from '../schemas/download.schema.js';
-import { analyticsEngine } from '../services/analytics.service.js';
+import { Context } from "hono";
+import { downloadService } from "../services/download.service.js";
+import {
+  analyzeUrlSchema,
+  unlockSessionSchema,
+} from "../schemas/download.schema.js";
+import { analyticsEngine } from "../services/analytics.service.js";
 
 export class DownloadController {
   public async analyze(c: Context) {
     const body = await c.req.json();
     const result = analyzeUrlSchema.safeParse(body);
+    console.log("enter download controller analyze");
     if (!result.success) {
       return c.json({ success: false, errors: result.error.errors }, 400);
     }
     const data = await downloadService.processUrlAnalysis(result.data.url);
-    analyticsEngine.increment('url_analyzed');
+    console.log("download controller analyze data", data);
+    analyticsEngine.increment("url_analyzed");
     return c.json({ success: true, data });
   }
 
@@ -23,7 +28,7 @@ export class DownloadController {
     }
     const meta = await downloadService.processUrlAnalysis(result.data.url);
     const sessionData = downloadService.initInterstitialsSession(meta);
-    analyticsEngine.increment('download_clicked');
+    analyticsEngine.increment("download_clicked");
     return c.json(sessionData);
   }
 
@@ -33,11 +38,19 @@ export class DownloadController {
     if (!result.success) {
       return c.json({ success: false, errors: result.error.errors }, 400);
     }
-    const unlockProcess = downloadService.verifyUnlockState(result.data.sessionId);
+    const unlockProcess = downloadService.verifyUnlockState(
+      result.data.sessionId,
+    );
     if (!unlockProcess.success) {
-      return c.json({ success: false, message: 'Verification lease pending or session unfulfilled.' }, 403);
+      return c.json(
+        {
+          success: false,
+          message: "Verification lease pending or session unfulfilled.",
+        },
+        403,
+      );
     }
-    analyticsEngine.increment('download_unlocked');
+    analyticsEngine.increment("download_unlocked");
     return c.json({ success: true, data: unlockProcess.data });
   }
 }
