@@ -4,6 +4,7 @@ class RealtimeAnalyticsEngine {
     download_clicked: 0,
     download_unlocked: 0,
     format_downloaded: 0,
+    video_streamed: 0,
     ad_view: 0,
     ad_closed: 0,
     history_reused: 0,

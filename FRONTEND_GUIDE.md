@@ -29,28 +29,21 @@ Content-Type: application/json
     "thumbnail": "https://...",
     "duration": 30,
     "author": "@user",
-    "videoUrl": "https://cdn.direct.url/video.mp4",
     "formats": [
       {
         "formatId": "0",
         "ext": "mp4",
         "resolution": "720x1280",
-        "url": "https://cdn.direct.url/format_0.mp4",
         "filesize": 5242880,
         "quality": "720p",
-        "urlTested": true,
-        "urlWorking": true,
         "isAudioAvailable": true
       },
       {
         "formatId": "1",
         "ext": "mp4",
         "resolution": "480x854",
-        "url": "https://cdn.direct.url/format_1.mp4",
         "filesize": 2097152,
         "quality": "480p",
-        "urlTested": true,
-        "urlWorking": true,
         "isAudioAvailable": true
       }
     ]
@@ -58,61 +51,13 @@ Content-Type: application/json
 }
 ```
 
-#### New Fields Explained
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `formats[].urlTested` | `boolean` | Whether the backend tested this URL with a HEAD request. `false` means the URL was not tested (usually because testing was skipped for performance). |
-| `formats[].urlWorking` | `boolean` | Whether the URL responded with a successful HTTP status. **Only trust this when `urlTested` is `true`.** |
-| `formats[].isAudioAvailable` | `boolean` | Whether this specific format contains an audio stream. `false` means the format is video-only. |
-
-#### Client-Side Handling for `urlTested` / `urlWorking`
-
-Some CDN URLs (especially TikTok, Instagram) expire quickly. The backend tests each format URL with a HEAD request. Here's how to use these fields:
-
-```typescript
-interface FormatItem {
-  formatId: string;
-  ext: string;
-  resolution: string;
-  url: string;
-  filesize?: number;
-  quality?: string;
-  urlTested: boolean;
-  urlWorking: boolean;
-  isAudioAvailable: boolean;
-}
-
-function selectWorkingFormat(formats: FormatItem[]): FormatItem | null {
-  // Prefer formats that were tested and are working
-  const working = formats.filter(f => f.urlTested && f.urlWorking);
-  if (working.length > 0) {
-    // Among working formats, pick the highest quality
-    return working.reduce((best, f) =>
-      (f.filesize || 0) > (best.filesize || 0) ? f : best
-    );
-  }
-
-  // If no working format found, try untested formats
-  // (they might still work — testing can fail for rate-limiting reasons)
-  const untested = formats.filter(f => !f.urlTested);
-  if (untested.length > 0) {
-    console.warn("No formats confirmed working, falling back to untested formats");
-    return untested.reduce((best, f) =>
-      (f.filesize || 0) > (best.filesize || 0) ? f : best
-    );
-  }
-
-  // All formats failed testing — user needs to re-analyze
-  return null;
-}
-```
+**Note:** Direct video/audio URLs are **never** exposed to the client. All media is served through the server-side streaming endpoint using short-lived tokens.
 
 ---
 
 ## 2. Download with Ad Interstitial Flow
 
-This flow shows an ad before allowing the download.
+This flow shows an ad before allowing the download. After unlocking, you get a temporary `streamToken` to access the video.
 
 ### Step 2a: Start a Session
 
@@ -158,12 +103,25 @@ Content-Type: application/json
 {
   "success": true,
   "data": {
-    "platform": "tiktok",
-    "id": "123456789",
-    "title": "Video Title",
-    "formats": [
-      // ... same format objects as /api/download
-    ]
+    "metadata": {
+      "platform": "tiktok",
+      "id": "123456789",
+      "title": "Video Title",
+      "thumbnail": "https://...",
+      "duration": 30,
+      "author": "@user",
+      "formats": [
+        {
+          "formatId": "0",
+          "ext": "mp4",
+          "resolution": "720x1280",
+          "filesize": 5242880,
+          "quality": "720p",
+          "isAudioAvailable": true
+        }
+      ]
+    },
+    "streamToken": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
   }
 }
 ```
@@ -177,13 +135,43 @@ Content-Type: application/json
 }
 ```
 
+### Step 2d: Stream the Video
+
+Use the `streamToken` to play or download the video:
+
+```
+GET /api/download/stream/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+To download as a file, add `?download=1`:
+
+```
+GET /api/download/stream/a1b2c3d4-e5f6-7890-abcd-ef1234567890?download=1
+```
+
+**Behavior:**
+- Plays inline in a `<video>` element (supports seeking via Range requests)
+- With `?download=1`, sets `Content-Disposition: attachment` for file download
+- Token expires after **5 minutes** — refresh the unlock flow if it expires
+- The browser **never** sees the original Instagram/TikTok/CDN URL
+
+### Using the Stream Token in a `<video>` Element
+
+```html
+<video controls>
+  <source src="/api/download/stream/a1b2c3d4-e5f6-7890-abcd-ef1234567890" type="video/mp4">
+</video>
+```
+
+The browser will handle seeking automatically via HTTP Range requests.
+
 ---
 
-## 3. Server-Side Download (with Audio Merge)
+## 3. Server-Side Format Download (with Audio Merge)
 
-Use this endpoint when you want the server to download the media and stream it directly to the client. This solves two problems:
-1. **Expired URLs** — The server downloads fresh from the source
-2. **Missing audio** — If a format has no audio, the server merges the best audio stream using ffmpeg
+Use this endpoint when you want the server to download a specific format via yt-dlp and stream it directly to the client. This is useful for:
+- Getting a specific quality/format not available via the stream token
+- Server-side audio merging when a format is video-only
 
 ```
 POST /api/download/format
@@ -219,15 +207,14 @@ Content-Type: application/json
 }
 ```
 
-### When to Use Direct URL vs Server Download
+### When to Use Stream Token vs Format Download
 
 | Scenario | Use |
 |----------|-----|
-| `urlTested: true` and `urlWorking: true` | Direct URL (play in `<video>` or download via `fetch`) |
-| `urlTested: true` and `urlWorking: false` | Server download endpoint (`/api/download/format`) |
-| `urlTested: false` | Try direct URL first. If it fails, fall back to server download |
-| `isAudioAvailable: false` and ffmpeg is available | Server download endpoint will auto-merge audio |
-| `isAudioAvailable: false` and no ffmpeg | Direct URL only. Video will play without audio |
+| Play video in `<video>` element | Stream token (`GET /api/download/stream/:token`) |
+| Download video as file | Stream token with `?download=1` |
+| Need a specific format/quality | Format download (`POST /api/download/format`) |
+| Format has no audio (video-only) | Format download — server auto-merges audio via ffmpeg |
 
 ---
 
@@ -240,28 +227,34 @@ interface FormatItem {
   formatId: string;
   ext: string;
   resolution: string;
-  url: string;
   filesize?: number;
   quality?: string;
-  urlTested: boolean;
-  urlWorking: boolean;
   isAudioAvailable: boolean;
 }
 
-interface VideoData {
+interface SafeVideoMetadata {
   platform: string;
   id: string;
   title: string;
   thumbnail: string;
   duration: number;
   author: string;
-  videoUrl: string;
   formats: FormatItem[];
+}
+
+interface UnlockResponse {
+  metadata: SafeVideoMetadata;
+  streamToken: string;
+}
+
+interface SessionResponse {
+  sessionId: string;
+  unlockAfter: number;
 }
 
 const API_BASE = "http://localhost:3000";
 
-async function analyzeUrl(url: string): Promise<VideoData> {
+async function analyzeUrl(url: string): Promise<SafeVideoMetadata> {
   const res = await fetch(`${API_BASE}/api/download`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -277,61 +270,55 @@ async function analyzeUrl(url: string): Promise<VideoData> {
   return json.data;
 }
 
-function pickBestFormat(formats: FormatItem[]): FormatItem | null {
-  // Priority: working > tested > untested
-  const working = formats.filter(f => f.urlTested && f.urlWorking);
-  if (working.length > 0) {
-    return working.reduce((a, b) => ((a.filesize || 0) > (b.filesize || 0) ? a : b));
-  }
-  const untested = formats.filter(f => !f.urlTested);
-  if (untested.length > 0) {
-    return untested.reduce((a, b) => ((a.filesize || 0) > (b.filesize || 0) ? a : b));
-  }
-  return formats[0] || null;
-}
-
-function canPlayDirectly(format: FormatItem): boolean {
-  return format.urlTested && format.urlWorking;
-}
-
-function downloadUrl({ url, formatId, isAudioAvailable }: {
-  url: string;
-  formatId: string;
-  isAudioAvailable: boolean;
-}): string {
-  return `${API_BASE}/api/download/format`;
-}
-
-async function downloadViaServer(url: string, format: FormatItem): Promise<Blob> {
-  const res = await fetch(`${API_BASE}/api/download/format`, {
+async function startSession(url: string): Promise<SessionResponse> {
+  const res = await fetch(`${API_BASE}/api/download/session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      url,
-      formatId: format.formatId,
-      isAudioAvailable: format.isAudioAvailable,
-    }),
+    body: JSON.stringify({ url }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Session creation failed (${res.status})`);
+  }
+
+  return res.json();
+}
+
+async function unlockSession(sessionId: string): Promise<UnlockResponse> {
+  const res = await fetch(`${API_BASE}/api/download/unlock`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => null);
-    throw new Error(err?.message || `Download failed (${res.status})`);
+    throw new Error(err?.message || `Unlock failed (${res.status})`);
   }
 
-  return res.blob();
+  return res.json();
+}
+
+function getStreamUrl(streamToken: string, download = false): string {
+  const base = `${API_BASE}/api/download/stream/${streamToken}`;
+  return download ? `${base}?download=1` : base;
 }
 
 // ─── React Component ───────────────────────────────────────────
 
 function VideoDownloader() {
   const [url, setUrl] = useState("");
-  const [data, setData] = useState<VideoData | null>(null);
+  const [data, setData] = useState<SafeVideoMetadata | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [streamToken, setStreamToken] = useState<string | null>(null);
+  const [unlockAfter, setUnlockAfter] = useState(0);
+  const [countdown, setCountdown] = useState(0);
 
   const handleAnalyze = async () => {
     setLoading(true);
     setError(null);
+    setStreamToken(null);
     try {
       const result = await analyzeUrl(url);
       setData(result);
@@ -342,24 +329,49 @@ function VideoDownloader() {
     }
   };
 
-  const handleDownload = async (format: FormatItem) => {
-    if (canPlayDirectly(format)) {
-      // Direct download — open in new tab or use <a> tag
-      window.open(format.url, "_blank");
-    } else {
-      // Server-side download (handles expired URLs + audio merge)
-      try {
-        const blob = await downloadViaServer(url, format);
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = blobUrl;
-        a.download = `video.${format.ext}`;
-        a.click();
-        URL.revokeObjectURL(blobUrl);
-      } catch (e: any) {
-        setError(e.message);
-      }
+  const handleStartSession = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const session = await startSession(url);
+      setUnlockAfter(session.unlockAfter);
+      setCountdown(session.unlockAfter);
+
+      // Countdown timer
+      const interval = setInterval(() => {
+        setCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(interval);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+
+      // Auto-unlock after the wait period
+      setTimeout(async () => {
+        try {
+          const unlocked = await unlockSession(session.sessionId);
+          setStreamToken(unlocked.streamToken);
+        } catch (e: any) {
+          setError(e.message);
+        }
+      }, session.unlockAfter * 1000);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
     }
+  };
+
+  const handleDownload = async () => {
+    if (!streamToken) return;
+
+    // Trigger download via stream token
+    const a = document.createElement("a");
+    a.href = getStreamUrl(streamToken, true);
+    a.download = "video.mp4";
+    a.click();
   };
 
   return (
@@ -371,7 +383,7 @@ function VideoDownloader() {
 
       {error && <div className="error">{error}</div>}
 
-      {data && (
+      {data && !streamToken && (
         <div className="results">
           <h2>{data.title}</h2>
           <p>{data.author} &middot; {data.duration}s</p>
@@ -383,11 +395,27 @@ function VideoDownloader() {
               <li key={f.formatId}>
                 {f.quality || f.resolution} ({f.ext})
                 {!f.isAudioAvailable && <span className="no-audio"> No audio</span>}
-                {f.urlTested && !f.urlWorking && <span className="expired"> URL expired</span>}
-                <button onClick={() => handleDownload(f)}>Download</button>
               </li>
             ))}
           </ul>
+
+          <button onClick={handleStartSession} disabled={loading}>
+            {countdown > 0
+              ? `Wait ${countdown}s...`
+              : loading
+                ? "Unlocking..."
+                : "Start Download"}
+          </button>
+        </div>
+      )}
+
+      {streamToken && (
+        <div className="stream">
+          <h3>Video Ready</h3>
+          <video controls width="100%">
+            <source src={getStreamUrl(streamToken)} type="video/mp4" />
+          </video>
+          <button onClick={handleDownload}>Download Video</button>
         </div>
       )}
     </div>
@@ -406,30 +434,39 @@ function VideoDownloader() {
 | `400` | Bad Request | Invalid URL, missing formatId, non-UUID sessionId |
 | `403` | Forbidden | Session not yet unlocked (wait and retry) |
 | `429` | Rate Limited | Too many requests (default: 20/min per IP) |
-| `404` | Not Found | Format no longer available on CDN |
+| `404` | Not Found | Stream token invalid or expired / format no longer available |
 | `500` | Server Error | yt-dlp failed, download failed, etc. |
+| `502` | Bad Gateway | Video source fetch failed (CDN unreachable) |
+| `504` | Gateway Timeout | Video source timed out |
 
 ### All Endpoints Summary
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/api/download` | Analyze a URL and list all available formats |
+| `POST` | `/api/download` | Analyze a URL and list all available formats (no URLs exposed) |
 | `POST` | `/api/download/session` | Start an ad-interstitial download session |
-| `POST` | `/api/download/unlock` | Unlock a session after the wait period |
-| `POST` | `/api/download/format` | Download & stream a specific format (with optional audio merge) |
+| `POST` | `/api/download/unlock` | Unlock a session after the wait period — returns a `streamToken` |
+| `GET` | `/api/download/stream/:token` | Stream or download video via a temporary token (supports Range requests) |
+| `POST` | `/api/download/format` | Download & stream a specific format via yt-dlp (with optional audio merge) |
 | `GET` | `/health` | Health check |
 
 ### Common Edge Cases & How to Handle Them
 
+#### Stream token expired (404)
+
+Tokens expire after 5 minutes. If you get a 404:
+- Restart the session/unlock flow to get a fresh token
+- Don't cache stream tokens client-side for longer than a few minutes
+
 #### TikTok URLs expire quickly
 
-TikTok CDN URLs often become invalid within minutes. The `urlTested` / `urlWorking` fields tell you immediately if a URL is still valid. **Always check these fields before using a direct URL.** If a URL has expired, use the `/api/download/format` endpoint instead — the server downloads fresh from the source.
+TikTok CDN URLs expire within minutes. The **stream token** endpoint handles this by generating tokens short-lived enough that the upstream URL is still valid. The **format download** endpoint always downloads fresh from the source.
 
 #### Video has no audio (TikTok / Instagram common)
 
 Check `formats[].isAudioAvailable`. If `false`:
-- Option A: Use the `/api/download/format` endpoint — the server merges audio automatically (requires ffmpeg on the server)
-- Option B: Play the video directly (it will play without audio — fine for previews)
+- The stream token streams the main video (may play without audio — fine for previews)
+- Use the `/api/download/format` endpoint — the server merges audio automatically via ffmpeg
 
 #### Rate limiting (429)
 
@@ -443,12 +480,6 @@ The 15-minute session TTL is generous, but if users leave the page open:
 - Show a clear "session expired" message
 - Automatically restart the flow from `/api/download/session`
 - Consider storing the session start time client-side and showing the status
-
-#### All formats have `urlWorking: false`
-
-This means the CDN URLs have all expired. The user should:
-1. Re-analyze the URL (fresh yt-dlp call = fresh CDN URLs)
-2. Use the `/api/download/format` endpoint for server-side download
 
 #### Platform not supported
 
@@ -470,11 +501,19 @@ curl -s -X POST http://localhost:3000/api/download/session \
   -d '{"url": "https://www.tiktok.com/@user/video/123456789"}' | jq .
 
 # 3. Unlock the session (wait 5 seconds first)
-curl -s -X POST http://localhost:3000/api/download/unlock \
+SESSION_RESPONSE=$(curl -s -X POST http://localhost:3000/api/download/unlock \
   -H "Content-Type: application/json" \
-  -d '{"sessionId": "SESSION_ID_FROM_STEP_2"}' | jq .
+  -d '{"sessionId": "SESSION_ID_FROM_STEP_2"}')
+echo "$SESSION_RESPONSE" | jq .
+STREAM_TOKEN=$(echo "$SESSION_RESPONSE" | jq -r '.data.streamToken')
 
-# 4. Download a specific format (server-side, with audio merge)
+# 4. Stream the video (plays in browser)
+curl -s http://localhost:3000/api/download/stream/$STREAM_TOKEN -o video.mp4
+
+# 5. Download with attachment header
+curl -s -OJ "http://localhost:3000/api/download/stream/$STREAM_TOKEN?download=1"
+
+# 6. Download a specific format (server-side, with audio merge)
 curl -s -X POST http://localhost:3000/api/download/format \
   -H "Content-Type: application/json" \
   -d '{"url": "https://www.tiktok.com/@user/video/123456789", "formatId": "0", "isAudioAvailable": false}' \

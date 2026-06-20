@@ -6,5 +6,6 @@ downloadRouter.post('/', (c) => downloadController.analyze(c));
 downloadRouter.post('/session', (c) => downloadController.startSession(c));
 downloadRouter.post('/unlock', (c) => downloadController.verifyUnlock(c));
 downloadRouter.post('/format', (c) => downloadController.downloadFormat(c));
+downloadRouter.get('/stream/:token', (c) => downloadController.streamVideo(c));
 
 export default downloadRouter;
