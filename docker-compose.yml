@@ -1,0 +1,25 @@
+services:
+  aether:
+    build: .
+    container_name: aether-backend
+    ports:
+      - "${PORT:-10000}:10000"
+    environment:
+      - PORT=10000
+      - NODE_ENV=production
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+      - CACHE_TTL_MINUTES=${CACHE_TTL_MINUTES:-30}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-20}
+      - RATE_LIMIT_WINDOW_MINUTES=${RATE_LIMIT_WINDOW_MINUTES:-1}
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-3}
+      - YTDLP_TIMEOUT_MS=${YTDLP_TIMEOUT_MS:-30000}
+      - YTDLP_DOWNLOAD_TIMEOUT_MS=${YTDLP_DOWNLOAD_TIMEOUT_MS:-120000}
+      - DOWNLOAD_UNLOCK_SECONDS=${DOWNLOAD_UNLOCK_SECONDS:-5}
+      - URL_TEST_TIMEOUT_MS=${URL_TEST_TIMEOUT_MS:-5000}
+      - TEMP_DIR=/tmp/aether-downloads
+    volumes:
+      - aether-temp:/tmp/aether-downloads
+      - ./cookies.txt:/app/cookies.txt
+
+volumes:
+  aether-temp:

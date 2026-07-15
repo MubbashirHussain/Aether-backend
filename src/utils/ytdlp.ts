@@ -1,11 +1,37 @@
 import { execFile } from "child_process";
 import { env } from "../config/env.js";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const findCookies = (): string | null => {
+  const candidates = [
+    path.resolve(__dirname, "../../cookies.txt"),
+    path.resolve(process.cwd(), "cookies.txt"),
+    path.resolve(process.cwd(), "../cookies.txt"),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
+};
 
 export const execYtDlp = (url: string): Promise<any> => {
   return new Promise((resolve, reject) => {
-    const args = ["--dump-single-json", "--no-playlist", "--no-warnings", url];
+    const args = ["--dump-single-json", "--no-playlist", "--no-warnings"];
 
-    const binary = process.env.YTDLP_PATH || (process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+    const cookiesFile = process.env.YTDLP_COOKIES_FILE || findCookies();
+    if (cookiesFile) {
+      args.push("--cookies", cookiesFile);
+    }
+    if (process.env.YTDLP_COOKIES_BROWSER) {
+      args.push("--cookies-from-browser", process.env.YTDLP_COOKIES_BROWSER);
+    }
+
+    args.push(url);
+
+    const binary =
+      process.env.YTDLP_PATH ||
+      (process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp");
 
     const child = execFile(
       binary,
@@ -13,7 +39,8 @@ export const execYtDlp = (url: string): Promise<any> => {
       { timeout: env.YTDLP_TIMEOUT_MS },
       (error, stdout, stderr) => {
         if (error) {
-          return reject(new Error(stderr || error.message));
+          const msg = stderr || error.message;
+          return reject(new Error(msg.replace(/^ERROR:\s*/, "")));
         }
         try {
           const parsed = JSON.parse(stdout);
@@ -21,7 +48,7 @@ export const execYtDlp = (url: string): Promise<any> => {
         } catch (parseError) {
           reject(
             new Error(
-              "Failed to serialize target payload extraction structural mapping downstream.",
+              `Failed to parse yt-dlp JSON output: ${parseError instanceof Error ? parseError.message : parseError}. Stderr: ${stderr.slice(0, 200)}`,
             ),
           );
         }
