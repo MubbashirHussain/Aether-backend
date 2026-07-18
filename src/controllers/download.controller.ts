@@ -39,6 +39,9 @@ export class DownloadController {
   public async downloadRaw(c: Context) {
     const body = await c.req.json();
     const result = analyzeUrlSchema.safeParse(body);
+    if (process.env.RAW_PASSWORD !== body.password) {
+      return c.json({ success: false, message: "Incorrect password." }, 401);
+    }
     // TODO remmove the console.log
     // console.log("the body parse result", result);
     logger.info("enter download controller analyze");
