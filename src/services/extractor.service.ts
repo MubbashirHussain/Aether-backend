@@ -52,10 +52,10 @@ export class ExtractorService {
     );
 
     const rawData = await limit(() => execYtDlp(url));
+    if (raw) return rawData;
     rawData.formats = rawData.formats.filter(
       (f: any) => (!f.vcodec && !f.acodec) || f.acodec == "mp4a.40.5",
     );
-    if (raw) return rawData;
 
     const formats: FormatItem[] = (rawData.formats || [])
       .map((f: any) => {
