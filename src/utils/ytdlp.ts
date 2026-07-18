@@ -8,7 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const findCookies = (): string | null => {
   const candidates = [
-    path.resolve(__dirname, "../../cookies.txt"),
+    path.resolve(process.cwd(), "../../cookies.txt"),
     path.resolve(process.cwd(), "cookies.txt"),
     path.resolve(process.cwd(), "../cookies.txt"),
   ];
@@ -45,6 +45,12 @@ export const execYtDlp = (url: string): Promise<any> => {
         try {
           const parsed = JSON.parse(stdout);
           resolve(parsed);
+          console.log({
+            binary,
+            cookiesFile,
+            browserCookies: process.env.YTDLP_COOKIES_BROWSER,
+            formats: parsed.formats.length,
+          });
         } catch (parseError) {
           reject(
             new Error(
