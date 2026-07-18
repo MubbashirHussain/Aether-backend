@@ -1,19 +1,23 @@
-import { SessionItem, VideoMetadata } from '../types/index.js';
-import { env } from '../config/env.js';
+import { SessionItem, VideoMetadata, FormatItem } from "../types/index.js";
+import { env } from "../config/env.js";
 
 class DownloadSessionManager {
   private sessions = new Map<string, SessionItem>();
   private sessionTtlMs = 15 * 60 * 1000;
 
-  createSession(metadata: VideoMetadata): SessionItem {
+  createSession(
+    metadata: VideoMetadata,
+    selectedFormat: FormatItem,
+  ): SessionItem {
     const sessionId = crypto.randomUUID();
     const now = Date.now();
     const item: SessionItem = {
       sessionId,
       metadata,
+      selectedFormat,
       createdAt: now,
-      unlockAfter: now + (env.DOWNLOAD_UNLOCK_SECONDS * 1000),
-      isUnlocked: false
+      unlockAfter: now + env.DOWNLOAD_UNLOCK_SECONDS * 1000,
+      isUnlocked: false,
     };
     this.sessions.set(sessionId, item);
     return item;
@@ -29,11 +33,18 @@ class DownloadSessionManager {
     return session;
   }
 
-  unlock(sessionId: string): boolean {
+  unlock(sessionId: string): { unlockAfter: number; unlocked: boolean } {
     const session = this.getSession(sessionId);
-    if (!session || Date.now() < session.unlockAfter) return false;
+    if (!session || Date.now() < session.unlockAfter)
+      return {
+        unlockAfter: ((session?.unlockAfter ?? 0) - Date.now()) / 1000,
+        unlocked: false,
+      };
     session.isUnlocked = true;
-    return true;
+    return {
+      unlocked: true,
+      unlockAfter: 0,
+    };
   }
 }
 

@@ -61,14 +61,22 @@ This flow shows an ad before allowing the download. After unlocking, you get a t
 
 ### Step 2a: Start a Session
 
+Pick a format and start a session for that specific format.
+
 ```
 POST /api/download/session
 Content-Type: application/json
 
 {
-  "url": "https://www.tiktok.com/@user/video/123456789"
+  "url": "https://www.tiktok.com/@user/video/123456789",
+  "formatId": "0"
 }
 ```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `url` | Yes | The original video URL |
+| `formatId` | Yes | The format ID from the analysis response to lock into |
 
 **Response:**
 
@@ -81,6 +89,7 @@ Content-Type: application/json
 
 - `unlockAfter`: seconds to wait before the download is unlocked
 - Session expires after 15 minutes of inactivity
+- The session is tied to the specific `formatId` — unlocking only grants access to that format
 
 ### Step 2b: Wait (Show Ad)
 
@@ -103,37 +112,32 @@ Content-Type: application/json
 {
   "success": true,
   "data": {
-    "metadata": {
-      "platform": "tiktok",
-      "id": "123456789",
-      "title": "Video Title",
-      "thumbnail": "https://...",
-      "duration": 30,
-      "author": "@user",
-      "formats": [
-        {
-          "formatId": "0",
-          "ext": "mp4",
-          "resolution": "720x1280",
-          "filesize": 5242880,
-          "quality": "720p",
-          "isAudioAvailable": true
-        }
-      ]
+    "selectedFormat": {
+      "formatId": "0",
+      "ext": "mp4",
+      "resolution": "720x1280",
+      "filesize": 5242880,
+      "quality": "720p",
+      "isAudioAvailable": true
     },
     "streamToken": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
   }
 }
 ```
 
-**Error Response (403):**
+The unlock response only returns the format the session was created with, plus the stream token — no full metadata.
+
+**Error Response (403) — unlock timer still running:**
 
 ```json
 {
   "success": false,
-  "message": "Verification lease pending or session unfulfilled."
+  "unlockAfter": 3.2,
+  "message": "Session not unlocked"
 }
 ```
+
+- `unlockAfter`: seconds remaining before the unlock is available. The frontend should wait this long and retry.
 
 ### Step 2d: Stream the Video
 
@@ -243,7 +247,7 @@ interface SafeVideoMetadata {
 }
 
 interface UnlockResponse {
-  metadata: SafeVideoMetadata;
+  selectedFormat: FormatItem;
   streamToken: string;
 }
 
@@ -270,11 +274,11 @@ async function analyzeUrl(url: string): Promise<SafeVideoMetadata> {
   return json.data;
 }
 
-async function startSession(url: string): Promise<SessionResponse> {
+async function startSession(url: string, formatId: string): Promise<SessionResponse> {
   const res = await fetch(`${API_BASE}/api/download/session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, formatId }),
   });
 
   if (!res.ok) {
@@ -284,19 +288,33 @@ async function startSession(url: string): Promise<SessionResponse> {
   return res.json();
 }
 
-async function unlockSession(sessionId: string): Promise<UnlockResponse> {
+/**
+ * Attempt to unlock. Returns the unlock response on success.
+ * On 403 with unlockAfter, returns null so the caller can retry.
+ * Throws on other errors.
+ */
+async function unlockSession(sessionId: string): Promise<UnlockResponse | null> {
   const res = await fetch(`${API_BASE}/api/download/unlock`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sessionId }),
   });
 
+  if (res.status === 403) {
+    const body = await res.json().catch(() => ({}));
+    if (body.unlockAfter != null) {
+      return null; // Not ready yet — caller should retry
+    }
+    throw new Error(body.message || "Unlock failed");
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => null);
     throw new Error(err?.message || `Unlock failed (${res.status})`);
   }
 
-  return res.json();
+  const json = await res.json();
+  return json.data;
 }
 
 function getStreamUrl(streamToken: string, download = false): string {
@@ -309,9 +327,11 @@ function getStreamUrl(streamToken: string, download = false): string {
 function VideoDownloader() {
   const [url, setUrl] = useState("");
   const [data, setData] = useState<SafeVideoMetadata | null>(null);
+  const [selectedFormatId, setSelectedFormatId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [streamToken, setStreamToken] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [unlockAfter, setUnlockAfter] = useState(0);
   const [countdown, setCountdown] = useState(0);
 
@@ -319,6 +339,7 @@ function VideoDownloader() {
     setLoading(true);
     setError(null);
     setStreamToken(null);
+    setSessionId(null);
     try {
       const result = await analyzeUrl(url);
       setData(result);
@@ -330,14 +351,16 @@ function VideoDownloader() {
   };
 
   const handleStartSession = async () => {
+    if (!selectedFormatId) return;
     setLoading(true);
     setError(null);
     try {
-      const session = await startSession(url);
+      const session = await startSession(url, selectedFormatId);
+      setSessionId(session.sessionId);
       setUnlockAfter(session.unlockAfter);
-      setCountdown(session.unlockAfter);
 
-      // Countdown timer
+      // Start countdown, then poll unlock
+      setCountdown(session.unlockAfter);
       const interval = setInterval(() => {
         setCountdown(prev => {
           if (prev <= 1) {
@@ -348,19 +371,26 @@ function VideoDownloader() {
         });
       }, 1000);
 
-      // Auto-unlock after the wait period
-      setTimeout(async () => {
-        try {
-          const unlocked = await unlockSession(session.sessionId);
-          setStreamToken(unlocked.streamToken);
-        } catch (e: any) {
-          setError(e.message);
-        }
-      }, session.unlockAfter * 1000);
+      // Start polling after the initial wait period
+      setTimeout(() => pollUnlock(session.sessionId), session.unlockAfter * 1000);
     } catch (e: any) {
       setError(e.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const pollUnlock = async (sid: string) => {
+    try {
+      const result = await unlockSession(sid);
+      if (result === null) {
+        // Server says not ready yet — retry after 1 second
+        setTimeout(() => pollUnlock(sid), 1000);
+        return;
+      }
+      setStreamToken(result.streamToken);
+    } catch (e: any) {
+      setError(e.message);
     }
   };
 
@@ -389,22 +419,36 @@ function VideoDownloader() {
           <p>{data.author} &middot; {data.duration}s</p>
           <img src={data.thumbnail} alt={data.title} width={200} />
 
-          <h3>Available Formats</h3>
+          <h3>Select Format</h3>
           <ul>
             {data.formats.map(f => (
               <li key={f.formatId}>
-                {f.quality || f.resolution} ({f.ext})
-                {!f.isAudioAvailable && <span className="no-audio"> No audio</span>}
+                <label>
+                  <input
+                    type="radio"
+                    name="format"
+                    value={f.formatId}
+                    checked={selectedFormatId === f.formatId}
+                    onChange={() => setSelectedFormatId(f.formatId)}
+                  />
+                  {f.quality || f.resolution} ({f.ext})
+                  {!f.isAudioAvailable && <span className="no-audio"> No audio</span>}
+                </label>
               </li>
             ))}
           </ul>
 
-          <button onClick={handleStartSession} disabled={loading}>
-            {countdown > 0
-              ? `Wait ${countdown}s...`
-              : loading
-                ? "Unlocking..."
-                : "Start Download"}
+          <button
+            onClick={handleStartSession}
+            disabled={loading || !selectedFormatId}
+          >
+            {!selectedFormatId
+              ? "Select a format"
+              : countdown > 0
+                ? `Wait ${countdown}s...`
+                : loading
+                  ? "Unlocking..."
+                  : "Start Download"}
           </button>
         </div>
       )}
@@ -444,8 +488,8 @@ function VideoDownloader() {
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/download` | Analyze a URL and list all available formats (no URLs exposed) |
-| `POST` | `/api/download/session` | Start an ad-interstitial download session |
-| `POST` | `/api/download/unlock` | Unlock a session after the wait period — returns a `streamToken` |
+| `POST` | `/api/download/session` | Start an ad-interstitial download session for a specific format (`url` + `formatId`) |
+| `POST` | `/api/download/unlock` | Unlock a session after the wait period — returns `selectedFormat` + `streamToken` |
 | `GET` | `/api/download/stream/:token` | Stream or download video via a temporary token (supports Range requests) |
 | `POST` | `/api/download/format` | Download & stream a specific format via yt-dlp (with optional audio merge) |
 | `GET` | `/health` | Health check |
@@ -474,7 +518,14 @@ The backend allows 20 requests per minute per IP. If you hit this limit:
 - Back off and retry after 1 minute
 - Cache analysis results client-side to avoid redundant requests
 
-#### Session expired (403)
+#### Session unlock retry (403)
+
+If you get a 403 with `unlockAfter`, the server's timer hasn't expired yet (server and client clocks may differ):
+- Wait the returned `unlockAfter` seconds and retry the unlock call
+- Do not restart the session — the session is still valid and ticking
+- Only restart the session on a 404 (session expired/not found)
+
+#### Session expired (404)
 
 The 15-minute session TTL is generous, but if users leave the page open:
 - Show a clear "session expired" message
@@ -495,17 +546,29 @@ curl -s -X POST http://localhost:3000/api/download \
   -H "Content-Type: application/json" \
   -d '{"url": "https://www.tiktok.com/@user/video/123456789"}' | jq .
 
-# 2. Start a download session
-curl -s -X POST http://localhost:3000/api/download/session \
+# 2. Start a download session (pick a formatId from step 1)
+SESSION_RESPONSE=$(curl -s -X POST http://localhost:3000/api/download/session \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://www.tiktok.com/@user/video/123456789"}' | jq .
-
-# 3. Unlock the session (wait 5 seconds first)
-SESSION_RESPONSE=$(curl -s -X POST http://localhost:3000/api/download/unlock \
-  -H "Content-Type: application/json" \
-  -d '{"sessionId": "SESSION_ID_FROM_STEP_2"}')
+  -d '{"url": "https://www.tiktok.com/@user/video/123456789", "formatId": "0"}')
 echo "$SESSION_RESPONSE" | jq .
-STREAM_TOKEN=$(echo "$SESSION_RESPONSE" | jq -r '.data.streamToken')
+SESSION_ID=$(echo "$SESSION_RESPONSE" | jq -r '.sessionId')
+
+# 3. Unlock the session — retry if not ready yet
+while true; do
+  UNLOCK_RESPONSE=$(curl -s -X POST http://localhost:3000/api/download/unlock \
+    -H "Content-Type: application/json" \
+    -d "{\"sessionId\": \"$SESSION_ID\"}")
+  UNLOCK_AFTER=$(echo "$UNLOCK_RESPONSE" | jq -r '.unlockAfter // empty')
+
+  if [ -n "$UNLOCK_AFTER" ] && [ "$UNLOCK_AFTER" != "0" ]; then
+    echo "Not yet ready — waiting ${UNLOCK_AFTER}s..."
+    sleep "$UNLOCK_AFTER"
+  else
+    echo "$UNLOCK_RESPONSE" | jq .
+    STREAM_TOKEN=$(echo "$UNLOCK_RESPONSE" | jq -r '.data.streamToken')
+    break
+  fi
+done
 
 # 4. Stream the video (plays in browser)
 curl -s http://localhost:3000/api/download/stream/$STREAM_TOKEN -o video.mp4

@@ -1,9 +1,10 @@
 import { Context } from "hono";
 import { stream } from "hono/streaming";
 import { createReadStream, statSync, existsSync } from "fs";
-import { downloadService } from "../services/download.service.js";
+import { downloadService, UnlockResult } from "../services/download.service.js";
 import {
   analyzeUrlSchema,
+  sessionSchema,
   unlockSessionSchema,
   downloadFormatSchema,
 } from "../schemas/download.schema.js";
@@ -29,22 +30,45 @@ export class DownloadController {
     const data = await downloadService.processUrlAnalysis(result.data.url);
     logger.info("got the download controller analyze response");
     analyticsEngine.increment("url_analyzed");
-    console.log("the data", data);
     // Strip all direct video/audio URLs from the response
     return c.json({
       success: true,
       data: downloadService.toSafeMetadata(data),
     });
   }
-
-  public async startSession(c: Context) {
+  public async downloadRaw(c: Context) {
     const body = await c.req.json();
     const result = analyzeUrlSchema.safeParse(body);
+    // TODO remmove the console.log
+    // console.log("the body parse result", result);
+    logger.info("enter download controller analyze");
     if (!result.success) {
       return c.json({ success: false, errors: result.error.errors }, 400);
     }
-    const meta = await downloadService.processUrlAnalysis(result.data.url);
-    const sessionData = downloadService.initInterstitialsSession(meta);
+    const data = await downloadService.processUrlAnalysis(
+      result.data.url,
+      true,
+    );
+    logger.info("got the download controller analyze response");
+    analyticsEngine.increment("url_analyzed");
+    // Strip all direct video/audio URLs from the response
+    return c.json({
+      success: true,
+      data: data,
+    });
+  }
+  public async startSession(c: Context) {
+    const body = await c.req.json();
+    const result = sessionSchema.safeParse(body);
+    if (!result.success) {
+      return c.json({ success: false, errors: result.error.errors }, 400);
+    }
+    const { url, formatId } = result.data;
+    const meta = await downloadService.processUrlAnalysis(url);
+    const sessionData = downloadService.initInterstitialsSession(
+      meta,
+      formatId,
+    );
     analyticsEngine.increment("download_clicked");
     return c.json(sessionData);
   }
@@ -55,14 +79,15 @@ export class DownloadController {
     if (!result.success) {
       return c.json({ success: false, errors: result.error.errors }, 400);
     }
-    const unlockProcess = downloadService.verifyUnlockState(
+    const unlockProcess: UnlockResult = downloadService.verifyUnlockState(
       result.data.sessionId,
     );
-    if (!unlockProcess.success) {
+    if (!unlockProcess.success && !unlockProcess.data?.unlockAfter) {
       return c.json(
         {
           success: false,
-          message: "Verification lease pending or session unfulfilled.",
+          unlockAfter: unlockProcess.data?.unlockAfter,
+          message: unlockProcess.message,
         },
         403,
       );
@@ -327,14 +352,20 @@ export class DownloadController {
           totalSize: stats.size,
           downloadedBytes: stats.size,
         });
-        logger.info({ downloadId, filePath: result.filePath }, "Download completed");
+        logger.info(
+          { downloadId, filePath: result.filePath },
+          "Download completed",
+        );
       })
       .catch((err) => {
         downloadProgressStore.updateProgress(downloadId, {
           status: "error",
           error: (err as Error).message,
         });
-        logger.error({ downloadId, error: (err as Error).message }, "Download failed");
+        logger.error(
+          { downloadId, error: (err as Error).message },
+          "Download failed",
+        );
       });
 
     analyticsEngine.increment("format_download_initiated");
@@ -369,7 +400,10 @@ export class DownloadController {
     c.header("Connection", "keep-alive");
 
     // If already completed or errored, send state and close
-    if (initialState.status === "completed" || initialState.status === "error") {
+    if (
+      initialState.status === "completed" ||
+      initialState.status === "error"
+    ) {
       const data = JSON.stringify({
         status: initialState.status,
         percent: initialState.percent,
@@ -399,33 +433,36 @@ export class DownloadController {
       await stream.write(encoder.encode(`data: ${initialEvent}\n\n`));
 
       // Subscribe to updates
-      const unsubscribe = downloadProgressStore.subscribe(downloadId, (state) => {
-        if (isDone) return;
+      const unsubscribe = downloadProgressStore.subscribe(
+        downloadId,
+        (state) => {
+          if (isDone) return;
 
-        const data = JSON.stringify({
-          status: state.status,
-          percent: state.percent,
-          speed: state.speed,
-          eta: state.eta,
-          totalSize: state.totalSize,
-          downloadedBytes: state.downloadedBytes,
-          error: state.error,
-        });
-
-        stream
-          .write(encoder.encode(`data: ${data}\n\n`))
-          .then(() => {
-            if (state.status === "completed" || state.status === "error") {
-              isDone = true;
-              unsubscribe();
-              // Hono will close the stream when we return
-            }
-          })
-          .catch(() => {
-            // Client disconnected
-            unsubscribe();
+          const data = JSON.stringify({
+            status: state.status,
+            percent: state.percent,
+            speed: state.speed,
+            eta: state.eta,
+            totalSize: state.totalSize,
+            downloadedBytes: state.downloadedBytes,
+            error: state.error,
           });
-      });
+
+          stream
+            .write(encoder.encode(`data: ${data}\n\n`))
+            .then(() => {
+              if (state.status === "completed" || state.status === "error") {
+                isDone = true;
+                unsubscribe();
+                // Hono will close the stream when we return
+              }
+            })
+            .catch(() => {
+              // Client disconnected
+              unsubscribe();
+            });
+        },
+      );
 
       // Wait until done or client disconnects
       await new Promise<void>((resolve) => {
@@ -474,7 +511,10 @@ export class DownloadController {
     }
 
     if (!existsSync(state.filePath)) {
-      downloadProgressStore.updateProgress(downloadId, { status: "error", error: "File not found on server" });
+      downloadProgressStore.updateProgress(downloadId, {
+        status: "error",
+        error: "File not found on server",
+      });
       return c.json(
         { success: false, message: "Download file no longer available." },
         404,

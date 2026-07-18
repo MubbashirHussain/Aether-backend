@@ -62,6 +62,7 @@ export interface CacheItem {
 export interface SessionItem {
   sessionId: string;
   metadata: VideoMetadata;
+  selectedFormat: FormatItem;
   createdAt: number;
   unlockAfter: number;
   isUnlocked: boolean;

@@ -1,7 +1,23 @@
-import { VideoMetadata, SafeVideoMetadata } from "../types/index.js";
+import {
+  VideoMetadata,
+  SafeVideoMetadata,
+  SafeFormatItem,
+} from "../types/index.js";
 import { sessionStore } from "../utils/sessionStore.js";
 import { streamTokenStore } from "../utils/streamTokenStore.js";
 import { extractorService } from "./extractor.service.js";
+
+export interface UnlockResult {
+  success: boolean;
+  message: string;
+  data?: {
+    unlockAfter?: number;
+    unlocked?: boolean;
+    selectedFormat?: SafeFormatItem;
+    streamToken?: string;
+  };
+  streamToken?: string;
+}
 
 export class DownloadService {
   /**
@@ -41,37 +57,47 @@ export class DownloadService {
     return mimeTypes[ext] || "video/mp4";
   }
 
-  public async processUrlAnalysis(url: string): Promise<VideoMetadata> {
-    console.log("enter download service");
-    return await extractorService.extractMetadata(url);
+  public async processUrlAnalysis(
+    url: string,
+    raw: boolean = false,
+  ): Promise<VideoMetadata> {
+    return await extractorService.extractMetadata(url, raw);
   }
 
-  public initInterstitialsSession(metadata: VideoMetadata): {
-    sessionId: string;
-    unlockAfter: number;
-  } {
-    const session = sessionStore.createSession(metadata);
+  public initInterstitialsSession(
+    metadata: VideoMetadata,
+    formatId: string,
+  ): { sessionId: string; unlockAfter: number } {
+    const selectedFormat = metadata.formats.find(
+      (f) => f.formatId === formatId,
+    );
+    if (!selectedFormat) {
+      throw new Error(`Format ${formatId} not found in video metadata`);
+    }
+    const session = sessionStore.createSession(metadata, selectedFormat);
     return {
       sessionId: session.sessionId,
       unlockAfter: 5,
     };
   }
 
-  public verifyUnlockState(sessionId: string): {
-    success: boolean;
-    data?: {
-      metadata: SafeVideoMetadata;
-      streamToken: string;
-    };
-  } {
+  public verifyUnlockState(sessionId: string): UnlockResult {
     const session = sessionStore.getSession(sessionId);
-    if (!session) return { success: false };
+    if (!session) return { success: false, message: "Session not found" };
 
     const unlocked = sessionStore.unlock(sessionId);
-    if (!unlocked) return { success: false };
+    if (!unlocked.unlocked)
+      return {
+        success: false,
+        message: "Session not unlocked",
+        data: {
+          unlockAfter: unlocked.unlockAfter,
+          unlocked: unlocked.unlocked,
+        },
+      };
 
-    // Create a stream token for the main video URL
-    const videoUrl = session.metadata.videoUrl;
+    // Create a stream token for the selected format's URL
+    const videoUrl = session.selectedFormat.url;
     const mimeType = this.getMimeType(videoUrl);
     const streamToken = streamTokenStore.createToken(
       videoUrl,
@@ -79,10 +105,19 @@ export class DownloadService {
       sessionId,
     );
 
+    const sf = session.selectedFormat;
     return {
       success: true,
+      message: "Session unlocked successfully",
       data: {
-        metadata: this.toSafeMetadata(session.metadata),
+        selectedFormat: {
+          formatId: sf.formatId,
+          ext: sf.ext,
+          resolution: sf.resolution,
+          quality: sf.quality,
+          filesize: sf.filesize,
+          isAudioAvailable: sf.isAudioAvailable,
+        },
         streamToken,
       },
     };
